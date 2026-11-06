@@ -1328,7 +1328,22 @@ void MujocoSystemInterface::joint_command_to_actuator_command()
 bool MujocoSystemInterface::register_mujoco_actuators()
 {
   mujoco_actuator_data_.clear();
-  mujoco_actuator_data_.resize(simulation_->model()->nu);
+
+  // Indicator function for valid actuator transmissions under the ROS2 control framework
+  auto check_valid_transmission = [&](const int type) {
+    return type == mjTRN_JOINT || type == mjTRN_TENDON || type == mjTRN_SITE;
+  };
+
+  // Include only actuators that can be represented by the ROS2 control package
+  int nu_valid = 0;
+  for (int i = 0; i < simulation_->model()->nu; i++)
+  {
+    int trn_type = simulation_->model()->actuator_trntype[i];
+    if (check_valid_transmission(trn_type))
+      nu_valid++;
+  }
+
+  mujoco_actuator_data_.resize(nu_valid);
 
   // Pull the name of the file to load for starting config, if present. We only override start position if that
   // parameter exists and it is not an empty string
@@ -1362,11 +1377,12 @@ bool MujocoSystemInterface::register_mujoco_actuators()
                 "override_start_position_file not passed. Loading initial positions from ros2_control xacro.");
   }
 
+  std::vector<MuJoCoActuatorData>::iterator it_actuator_data = mujoco_actuator_data_.begin();
   for (int i = 0; i < simulation_->model()->nu; i++)
   {
     RCLCPP_DEBUG(get_logger(), "Registering MuJoCo actuator %ld/%ld", static_cast<long>(i + 1),
-                 static_cast<long>(simulation_->model()->nu));
-    MuJoCoActuatorData& actuator_data = mujoco_actuator_data_.at(i);
+                 static_cast<long>(mujoco_actuator_data_.size()));
+    MuJoCoActuatorData& actuator_data = *it_actuator_data;
 
     // Get the name of the joint/tendon corresponding to the actuator ID
     // Get the transmission type and target ID
@@ -1378,6 +1394,13 @@ bool MujocoSystemInterface::register_mujoco_actuators()
     if (!act_name)
     {
       act_name = "unnamed";
+    }
+
+    // If the actuator is not currently supported or valid for ROS2 control, skip
+    if (!check_valid_transmission(trn_type))
+    {
+      RCLCPP_WARN(get_logger(), "Unsupported transmission type '%d' for actuator '%s', skipping.", trn_type, act_name);
+      continue;
     }
 
     if (trn_type == mjTRN_JOINT)
@@ -1423,7 +1446,8 @@ bool MujocoSystemInterface::register_mujoco_actuators()
     }
     else
     {
-      RCLCPP_ERROR(get_logger(), "Unsupported transmission type '%d' for actuator '%s'", trn_type, act_name);
+      RCLCPP_ERROR(get_logger(), "Unsupported transmission type '%d' for actuator '%s' that was not skipped.", trn_type,
+                   act_name);
       return false;
     }
     actuator_data.mj_actuator_id = i;
@@ -1475,6 +1499,7 @@ bool MujocoSystemInterface::register_mujoco_actuators()
       actuator_data.has_vel_pid = initialize_velocity_pids();
     }
     RCLCPP_DEBUG(get_logger(), "Successfully registered actuator '%s'", act_name);
+    std::advance(it_actuator_data, 1);
   }
 
   // now look out for the MuJoCo joints that do not have any actuator associated with them
